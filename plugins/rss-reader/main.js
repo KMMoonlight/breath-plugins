@@ -223,22 +223,26 @@ function text(content, style, color) {
     return node;
 }
 
-// 主视图：顶部添加栏 + 订阅列表 + 选中订阅的文章列表。
+// 主视图：插件源设置风格的订阅源管理 + 选中订阅的文章列表。
 function mainTree() {
     var children = [
         {
             type: "hstack", spacing: 8, children: [
+                text("订阅源", "headline"),
+                { type: "spacer" },
                 {
-                    type: "textfield",
-                    placeholder: "输入 Feed 地址",
-                    value: "",
-                    onSubmit: { action: "add-feed" }
-                },
-                {
-                    type: "button", title: "添加", style: "bordered",
-                    onPress: { action: "add-feed" }
+                    type: "button", title: "刷新", style: "bordered",
+                    enabled: state.feeds.length > 0,
+                    onPress: { action: "refresh-all" }
                 }
             ]
+        },
+        {
+            type: "textfield",
+            placeholder: "RSS 或 Atom Feed 地址",
+            value: "",
+            submitTitle: "添加",
+            onSubmit: { action: "add-feed" }
         }
     ];
 
@@ -247,21 +251,32 @@ function mainTree() {
     }
 
     if (state.feeds.length === 0) {
-        children.push(text("还没有订阅。在上方输入 RSS 或 Atom 地址，按回车添加。", "body", "secondary"));
+        children.push(text("还没有订阅源", "body", "secondary"));
+        children.push(text("输入 RSS 或 Atom 地址后按回车，或点「添加」。", "caption", "secondary"));
         return { type: "vstack", spacing: 12, children: children };
     }
 
     children.push({
-        type: "list",
+        type: "list", style: "cards",
         children: state.feeds.map(function (feed) {
+            var articles = state.articles[feed.url];
+            var status = articles
+                ? articles.length + " 篇文章"
+                : "未加载";
             return {
-                type: "hstack", spacing: 8, children: [
-                    text(feed.title, "body"),
-                    { type: "spacer" },
+                type: "vstack", spacing: 4, children: [
                     {
-                        type: "button", title: "删除", style: "plain",
-                        onPress: { action: "remove-feed", url: feed.url }
-                    }
+                        type: "hstack", spacing: 8, children: [
+                            text(feed.title, "body"),
+                            { type: "spacer" },
+                            text(status, "caption", "secondary"),
+                            {
+                                type: "button", title: "移除", style: "bordered",
+                                onPress: { action: "remove-feed", url: feed.url }
+                            }
+                        ]
+                    },
+                    text(feed.url, "caption", "secondary")
                 ],
                 onSelect: { action: "select-feed", url: feed.url }
             };
@@ -352,8 +367,6 @@ function findFeed(url) {
 function addFeed(url) {
     url = (url || "").trim();
     if (!url) {
-        // “添加”按钮拿不到输入框内容（v1 组件没有 onChange），
-        // 真正的入口是输入框回车提交的 textfield.submit。
         state.message = "请在输入框中输入 Feed 地址后按回车添加。";
         return Promise.resolve();
     }
@@ -425,6 +438,27 @@ function refreshSelected() {
     });
 }
 
+// 刷新全部订阅源，供页面标题栏与命令面板复用。
+function refreshAllFeeds() {
+    var failures = 0;
+    var chain = Promise.resolve();
+    state.feeds.forEach(function (feed) {
+        chain = chain.then(function () {
+            return fetchFeed(feed.url).then(function (parsed) {
+                feed.title = parsed.title || feed.title;
+                state.articles[feed.url] = parsed.items;
+            }, function () {
+                failures += 1;
+            });
+        });
+    });
+    return chain.then(function () {
+        return saveFeeds();
+    }).then(function () {
+        return failures;
+    });
+}
+
 function errorMessage(error) {
     return (error && error.message) ? error.message : String(error);
 }
@@ -446,6 +480,12 @@ function onEvent(event) {
         work = removeFeed(payload.url);
     } else if (action === "refresh") {
         work = refreshSelected();
+    } else if (action === "refresh-all") {
+        work = refreshAllFeeds().then(function (failures) {
+            state.message = failures === 0
+                ? null
+                : "刷新完成，" + failures + " 个订阅源失败。";
+        });
     } else if (action === "back") {
         state.selectedArticle = -1;
         work = Promise.resolve();
@@ -475,22 +515,7 @@ breath.commands.register(
     { id: "refresh", title: "刷新所有订阅" },
     function (payload) {
         return ensureLoaded().then(function () {
-            var failures = 0;
-            // 逐个串行刷新，失败计数但不中断其余订阅。
-            var chain = Promise.resolve();
-            state.feeds.forEach(function (feed) {
-                chain = chain.then(function () {
-                    return fetchFeed(feed.url).then(function (parsed) {
-                        feed.title = parsed.title || feed.title;
-                        state.articles[feed.url] = parsed.items;
-                    }, function () {
-                        failures += 1;
-                    });
-                });
-            });
-            return chain.then(function () {
-                return saveFeeds();
-            }).then(function () {
+            return refreshAllFeeds().then(function (failures) {
                 return breath.notifications.post({
                     title: "RSS 阅读器",
                     body: failures === 0
