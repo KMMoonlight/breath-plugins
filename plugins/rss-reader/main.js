@@ -224,13 +224,18 @@ function text(content, style, color) {
     return node;
 }
 
-// 订阅源配置页：结构与 Breath 的插件源设置保持一致。
+// 订阅源管理窗口：主视图只保留入口，添加与删除分别交给宿主原生
+// prompt / confirm 对话框，交互结构与 IDEA 的插件源管理一致。
 function sourceSettingsTree() {
     var children = [
         {
             type: "hstack", spacing: 8, children: [
                 text("订阅源", "headline"),
                 { type: "spacer" },
+                {
+                    type: "button", title: "添加订阅源", style: "bordered",
+                    onPress: { action: "add-feed-dialog" }
+                },
                 {
                     type: "button", title: "刷新", style: "bordered",
                     enabled: state.feeds.length > 0,
@@ -241,13 +246,6 @@ function sourceSettingsTree() {
                     onPress: { action: "close-settings" }
                 }
             ]
-        },
-        {
-            type: "textfield",
-            placeholder: "RSS 或 Atom Feed 地址",
-            value: "",
-            submitTitle: "添加",
-            onSubmit: { action: "add-feed" }
         }
     ];
 
@@ -257,11 +255,12 @@ function sourceSettingsTree() {
 
     if (state.feeds.length === 0) {
         children.push(text("还没有订阅源", "body", "secondary"));
+        children.push(text("点「添加订阅源」输入 RSS 或 Atom 地址。", "caption", "secondary"));
         return { type: "vstack", spacing: 12, children: children };
     }
 
     children.push({
-        type: "list", style: "cards",
+        type: "list", style: "plain",
         children: state.feeds.map(function (feed) {
             var articles = state.articles[feed.url];
             var status = articles
@@ -393,13 +392,20 @@ function articleTree() {
 }
 
 function tree() {
-    if (state.selectedArticle >= 0 && state.selectedFeed) {
-        return articleTree();
-    }
+    var page = state.selectedArticle >= 0 && state.selectedFeed
+        ? articleTree()
+        : mainTree();
+    var children = [page];
     if (state.managingSources) {
-        return sourceSettingsTree();
+        children.push({
+            type: "sheet",
+            content: sourceSettingsTree(),
+            width: 480,
+            height: 360,
+            onDismiss: { action: "close-settings" }
+        });
     }
-    return mainTree();
+    return { type: "vstack", spacing: 0, children: children };
 }
 
 function findFeed(url) {
@@ -437,15 +443,41 @@ function addFeed(url) {
     });
 }
 
-function removeFeed(url) {
-    state.feeds = state.feeds.filter(function (feed) { return feed.url !== url; });
-    delete state.articles[url];
-    if (state.selectedFeed === url) {
-        state.selectedFeed = null;
-        state.selectedArticle = -1;
-    }
+// IDEA 风格的“添加仓库”流程：管理窗口保持列表上下文，地址输入由
+// Breath 的原生 prompt 承载，取消时不修改任何状态。
+function promptAndAddFeed() {
     state.message = null;
-    return saveFeeds();
+    return breath.dialogs.prompt({
+        title: "添加订阅源",
+        message: "输入 RSS 或 Atom Feed 地址",
+        placeholder: "https://example.com/feed.xml",
+        initialValue: ""
+    }).then(function (url) {
+        if (url === null) { return; }
+        return addFeed(url);
+    });
+}
+
+// 删除订阅是破坏性操作，先经宿主确认弹窗；取消则原样返回当前树。
+function removeFeed(url) {
+    var feed = findFeed(url);
+    var name = feed ? feed.title : url;
+    return breath.dialogs.confirm({
+        title: "删除订阅",
+        message: "确定要删除「" + name + "」吗？已加载的文章列表会一并移除。",
+        confirmTitle: "删除",
+        destructive: true
+    }).then(function (confirmed) {
+        if (!confirmed) { return; }
+        state.feeds = state.feeds.filter(function (feed) { return feed.url !== url; });
+        delete state.articles[url];
+        if (state.selectedFeed === url) {
+            state.selectedFeed = null;
+            state.selectedArticle = -1;
+        }
+        state.message = null;
+        return saveFeeds();
+    });
 }
 
 function refreshSelected() {
@@ -498,6 +530,8 @@ function onEvent(event) {
     var work;
     if (action === "add-feed") {
         work = addFeed(typeof payload.text === "string" ? payload.text : "");
+    } else if (action === "add-feed-dialog") {
+        work = promptAndAddFeed();
     } else if (action === "open-settings") {
         state.managingSources = true;
         state.message = null;

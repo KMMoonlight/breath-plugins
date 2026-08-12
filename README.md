@@ -35,7 +35,7 @@ breath-plugins/
     {
       "id": "app.breath.plugins.rss",
       "name": "RSS 阅读器",
-      "version": "0.1.2",
+      "version": "0.1.5",
       "description": "订阅 RSS/Atom Feed，在 Breath 里阅读文章。",
       "path": "plugins/rss-reader"
     }
@@ -51,7 +51,7 @@ breath-plugins/
 {
   "id": "app.breath.plugins.rss",
   "name": "RSS 阅读器",
-  "version": "0.1.2",
+  "version": "0.1.5",
   "description": "订阅 RSS/Atom Feed，在 Breath 里阅读文章。",
   "main": "main.js",
   "contributes": {
@@ -123,6 +123,31 @@ await breath.storage.delete("feeds");
 await breath.notifications.post({ title: "RSS 阅读器", body: "所有订阅已刷新。" });
 ```
 
+### 对话框
+
+```js
+// 纯通知（一个「好」按钮）
+await breath.dialogs.alert({ title: "注意", message: "出错了" });
+
+// 确认弹窗：用户点确认为 true，取消为 false
+var ok = await breath.dialogs.confirm({
+    title: "删除订阅",
+    message: "确定要删除吗？",
+    confirmTitle: "删除",   // 可选，默认「确认」
+    destructive: true       // 可选，确认按钮呈破坏性样式
+});
+
+// 输入弹窗：返回输入的字符串，用户取消时为 null
+var name = await breath.dialogs.prompt({
+    title: "重命名",
+    message: "输入新名称",   // 以下字段均可选
+    placeholder: "名称",
+    initialValue: "旧名"
+});
+```
+
+RSS 示例用 `sheet` 承载订阅源列表，并用 `prompt` 添加地址、用 `confirm` 确认删除；阅读主页只保留订阅源设置入口。
+
 ## 组件树 schema
 
 每个节点是一个 JSON 对象，`type` 必填，其余属性平铺：
@@ -134,9 +159,10 @@ await breath.notifications.post({ title: "RSS 阅读器", body: "所有订阅已
 - `image`：`url`（必填，http/https）、`width?`、`height?`
 - `list`：`children`（必填）、`style?: "plain"|"cards"`。每个子节点是一行，可携带 `onSelect?`（点按行时以 `list.select` 事件回传）
 - `webcontent`：`html`（必填，HTML 片段，在沙盒 WebView 里只读渲染，链接由系统浏览器打开）
+- `sheet`：`content`（必填）、`width?`、`height?`、`onDismiss?`（系统关闭时以 `sheet.dismiss` 事件回传）
 - `divider`、`spacer`（`length?`）
 
-事件类型：`button.press`、`textfield.submit`、`list.select`。事件 payload 就是组件上声明的 `onPress` / `onSubmit` / `onSelect` JSON（`textfield.submit` 额外并入 `text`）。
+事件类型：`button.press`、`textfield.submit`、`list.select`、`sheet.dismiss`。事件 payload 就是组件上声明的 `onPress` / `onSubmit` / `onSelect` / `onDismiss` JSON（`textfield.submit` 额外并入 `text`）。
 
 注意：组件没有 `onChange`，独立的 `button` 拿不到相邻输入框里的文本。需要“输入框 + 提交按钮”时，在 `textfield` 上设置 `submitTitle`；宿主会让按钮和回车共用 `textfield.submit` 事件。
 
@@ -160,4 +186,4 @@ await breath.notifications.post({ title: "RSS 阅读器", body: "所有订阅已
 
 ## 示例插件
 
-- [RSS 阅读器](plugins/rss-reader/)：订阅 RSS/Atom Feed，列表浏览文章，正文用 webcontent 渲染。演示了视图 + 命令 + fetch + storage + 通知的完整用法。
+- [RSS 阅读器](plugins/rss-reader/)：订阅 RSS/Atom Feed，列表浏览文章，正文用 webcontent 渲染。演示了视图 + 命令 + fetch + storage + 通知 + 删除确认对话框的完整用法。
