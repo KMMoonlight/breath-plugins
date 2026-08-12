@@ -16,6 +16,7 @@ var state = {
     articles: {},           // url -> [{title, link, html, date}]，仅会话内存
     selectedFeed: null,     // 当前选中订阅的 url
     selectedArticle: -1,    // 当前打开的文章在 articles[selectedFeed] 里的下标，-1 表示未打开
+    managingSources: false, // 是否正在显示订阅源设置
     message: null           // 展示给用户的错误/提示文本
 };
 
@@ -223,8 +224,8 @@ function text(content, style, color) {
     return node;
 }
 
-// 主视图：插件源设置风格的订阅源管理 + 选中订阅的文章列表。
-function mainTree() {
+// 订阅源配置页：结构与 Breath 的插件源设置保持一致。
+function sourceSettingsTree() {
     var children = [
         {
             type: "hstack", spacing: 8, children: [
@@ -234,6 +235,10 @@ function mainTree() {
                     type: "button", title: "刷新", style: "bordered",
                     enabled: state.feeds.length > 0,
                     onPress: { action: "refresh-all" }
+                },
+                {
+                    type: "button", title: "完成", style: "bordered",
+                    onPress: { action: "close-settings" }
                 }
             ]
         },
@@ -252,7 +257,6 @@ function mainTree() {
 
     if (state.feeds.length === 0) {
         children.push(text("还没有订阅源", "body", "secondary"));
-        children.push(text("输入 RSS 或 Atom 地址后按回车，或点「添加」。", "caption", "secondary"));
         return { type: "vstack", spacing: 12, children: children };
     }
 
@@ -277,53 +281,93 @@ function mainTree() {
                         ]
                     },
                     text(feed.url, "caption", "secondary")
-                ],
-                onSelect: { action: "select-feed", url: feed.url }
+                ]
             };
         })
     });
 
-    children.push({ type: "divider" });
+    return { type: "vstack", spacing: 12, children: children };
+}
 
-    if (!state.selectedFeed) {
-        children.push(text("从上方列表选择一个订阅查看文章。", "body", "secondary"));
+function allArticleRows() {
+    var rows = [];
+    state.feeds.forEach(function (feed) {
+        var articles = state.articles[feed.url] || [];
+        articles.forEach(function (article, index) {
+            rows.push({
+                feed: feed,
+                article: article,
+                index: index
+            });
+        });
+    });
+    rows.sort(function (a, b) {
+        return String(b.article.date || "").localeCompare(String(a.article.date || ""));
+    });
+    return rows;
+}
+
+// 阅读主页只呈现文章，订阅源管理收进右上角设置按钮。
+function mainTree() {
+    var articleRows = allArticleRows();
+    var children = [
+        {
+            type: "hstack", spacing: 8, children: [
+                text("文章", "headline"),
+                articleRows.length > 0
+                    ? text(articleRows.length + " 篇", "caption", "secondary")
+                    : { type: "spacer", length: 0 },
+                { type: "spacer" },
+                {
+                    type: "button", title: "刷新", style: "bordered",
+                    enabled: state.feeds.length > 0,
+                    onPress: { action: "refresh-all" }
+                },
+                {
+                    type: "button", title: "订阅源设置",
+                    systemImage: "gearshape", style: "plain",
+                    onPress: { action: "open-settings" }
+                }
+            ]
+        }
+    ];
+
+    if (state.message) {
+        children.push(text(state.message, "caption", "secondary"));
+    }
+
+    if (state.feeds.length === 0) {
+        children.push(text("还没有订阅", "body", "secondary"));
+        children.push(text("点右上角设置按钮添加订阅源。", "caption", "secondary"));
         return { type: "vstack", spacing: 12, children: children };
     }
 
-    var feed = findFeed(state.selectedFeed);
-    var articles = state.articles[state.selectedFeed] || [];
-    children.push({
-        type: "hstack", spacing: 8, children: [
-            text(feed ? feed.title : state.selectedFeed, "headline"),
-            { type: "spacer" },
-            {
-                type: "button", title: "刷新", style: "bordered",
-                onPress: { action: "refresh" }
-            }
-        ]
-    });
-
-    if (articles.length === 0) {
-        children.push(text("这个订阅还没有文章，点「刷新」试试。", "body", "secondary"));
-    } else {
-        children.push({
-            type: "list",
-            children: articles.map(function (article, index) {
-                var row = [text(article.title, "body", null)];
-                if (article.date) {
-                    row.push(text(article.date, "caption", "secondary"));
-                }
-                return {
-                    type: "vstack", spacing: 2, children: row,
-                    onSelect: {
-                        action: "select-article",
-                        feed: state.selectedFeed,
-                        index: index
-                    }
-                };
-            })
-        });
+    if (articleRows.length === 0) {
+        children.push(text("暂时没有文章，点「刷新」试试。", "body", "secondary"));
+        return { type: "vstack", spacing: 12, children: children };
     }
+
+    children.push({
+        type: "list",
+        children: articleRows.map(function (item) {
+            var metadata = [text(item.feed.title, "caption", "secondary")];
+            if (item.article.date) {
+                metadata.push({ type: "spacer" });
+                metadata.push(text(item.article.date, "caption", "secondary"));
+            }
+            return {
+                type: "vstack", spacing: 3, children: [
+                    text(item.article.title, "body"),
+                    { type: "hstack", spacing: 8, children: metadata }
+                ],
+                onSelect: {
+                    action: "select-article",
+                    feed: item.feed.url,
+                    index: item.index
+                }
+            };
+        })
+    });
 
     return { type: "vstack", spacing: 12, children: children };
 }
@@ -351,6 +395,9 @@ function articleTree() {
 function tree() {
     if (state.selectedArticle >= 0 && state.selectedFeed) {
         return articleTree();
+    }
+    if (state.managingSources) {
+        return sourceSettingsTree();
     }
     return mainTree();
 }
@@ -387,24 +434,6 @@ function addFeed(url) {
         return saveFeeds();
     }).catch(function (error) {
         state.message = "添加失败：" + errorMessage(error);
-    });
-}
-
-function selectFeed(url) {
-    state.selectedFeed = url;
-    state.selectedArticle = -1;
-    state.message = null;
-    if (state.articles[url]) { return Promise.resolve(); }
-    // 首次选中（例如重启后）补拉一次文章。
-    return fetchFeed(url).then(function (parsed) {
-        state.articles[url] = parsed.items;
-        var feed = findFeed(url);
-        if (feed && parsed.title) {
-            feed.title = parsed.title;
-            return saveFeeds();
-        }
-    }).catch(function (error) {
-        state.message = "加载失败：" + errorMessage(error);
     });
 }
 
@@ -469,8 +498,14 @@ function onEvent(event) {
     var work;
     if (action === "add-feed") {
         work = addFeed(typeof payload.text === "string" ? payload.text : "");
-    } else if (action === "select-feed" && typeof payload.url === "string") {
-        work = selectFeed(payload.url);
+    } else if (action === "open-settings") {
+        state.managingSources = true;
+        state.message = null;
+        work = Promise.resolve();
+    } else if (action === "close-settings") {
+        state.managingSources = false;
+        state.message = null;
+        work = Promise.resolve();
     } else if (action === "select-article") {
         state.selectedFeed = typeof payload.feed === "string" ? payload.feed : state.selectedFeed;
         state.selectedArticle = typeof payload.index === "number" ? payload.index : -1;

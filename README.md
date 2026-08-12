@@ -35,7 +35,7 @@ breath-plugins/
     {
       "id": "app.breath.plugins.rss",
       "name": "RSS 阅读器",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "description": "订阅 RSS/Atom Feed，在 Breath 里阅读文章。",
       "path": "plugins/rss-reader"
     }
@@ -51,7 +51,7 @@ breath-plugins/
 {
   "id": "app.breath.plugins.rss",
   "name": "RSS 阅读器",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "订阅 RSS/Atom Feed，在 Breath 里阅读文章。",
   "main": "main.js",
   "contributes": {
@@ -129,7 +129,7 @@ await breath.notifications.post({ title: "RSS 阅读器", body: "所有订阅已
 
 - `vstack` / `hstack`：`spacing?`、`children`（必填）
 - `text`：`content`（必填）、`style?: "title"|"headline"|"body"|"caption"`、`color?: "primary"|"secondary"`、`lineLimit?`
-- `button`：`title`（必填）、`onPress?`（任意 JSON，点按时以 `button.press` 事件原样回传）、`style?: "bordered"|"plain"`、`enabled?`
+- `button`：`title`（必填，同时作为无障碍标签）、`systemImage?`（SF Symbol）、`onPress?`（任意 JSON，点按时以 `button.press` 事件原样回传）、`style?: "bordered"|"plain"`、`enabled?`
 - `textfield`：`placeholder?`、`value`（必填）、`onSubmit?`、`submitTitle?`。回车或点击可选的提交按钮时以 `textfield.submit` 事件回传，提交文本并入 payload 的 `text` 字段
 - `image`：`url`（必填，http/https）、`width?`、`height?`
 - `list`：`children`（必填）、`style?: "plain"|"cards"`。每个子节点是一行，可携带 `onSelect?`（点按行时以 `list.select` 事件回传）
