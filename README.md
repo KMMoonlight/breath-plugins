@@ -1,0 +1,163 @@
+# breath-plugins
+
+Breath 的官方插件仓库。用户在 Breath 的「插件」页添加本仓库地址后，即可浏览并安装这里收录的插件。
+
+## 什么是 Breath 插件
+
+Breath 插件是一个运行在 JavaScriptCore 沙盒里的 JavaScript 包。宿主注入全局 `breath` 对象作为唯一 API 入口；插件通过它注册视图与命令、发起网络请求、读写键值存储、发送系统通知。
+
+运行时约束：
+
+- 每个插件一个独立的 JSContext，相互隔离；单次求值有执行时间上限（看门狗）。
+- 没有 DOM、没有 `XMLHttpRequest`/`fetch`、没有 `setTimeout`。网络只能走 `breath.fetch`，XML 等格式需用纯 JS 解析。
+- 渲染是全量重渲染模型：事件处理器返回一棵完整的新组件树，宿主整体替换。
+- 渲染与事件处理器可以是 `async` 函数（返回 Promise 的组件树），`await breath.*` 调用是推荐写法。
+- 网络请求受清单里 `permissions.network` 域名白名单约束，`["*"]` 表示任意域名（安装时会如实展示给用户）。
+
+## 仓库结构
+
+```
+breath-plugins/
+├── plugins.json              # 插件源索引（宿主读取的入口）
+└── plugins/
+    └── rss-reader/           # 一个插件一个目录
+        ├── plugin.json       # 插件清单
+        └── main.js           # 入口脚本
+```
+
+### plugins.json（源索引）
+
+仓库根目录的索引文件，列出本仓库可安装的插件：
+
+```json
+{
+  "plugins": [
+    {
+      "id": "app.breath.plugins.rss",
+      "name": "RSS 阅读器",
+      "version": "0.1.0",
+      "description": "订阅 RSS/Atom Feed，在 Breath 里阅读文章。",
+      "path": "plugins/rss-reader"
+    }
+  ]
+}
+```
+
+`path` 是插件目录相对仓库根的路径，目录内必须包含 `plugin.json` 与入口 JS。索引里的 `id` 必须与插件清单的 `id` 一致。
+
+### plugin.json（插件清单）
+
+```json
+{
+  "id": "app.breath.plugins.rss",
+  "name": "RSS 阅读器",
+  "version": "0.1.0",
+  "description": "订阅 RSS/Atom Feed，在 Breath 里阅读文章。",
+  "main": "main.js",
+  "contributes": {
+    "views": [
+      { "id": "main", "title": "RSS", "icon": "dot.radiowaves.up.forward" }
+    ],
+    "commands": [
+      { "id": "refresh", "title": "刷新所有订阅" }
+    ]
+  },
+  "permissions": {
+    "network": ["*"]
+  }
+}
+```
+
+字段说明：
+
+- `id`（必填）：反域名形式的全局唯一标识，安装后作为目录名与存储命名空间。
+- `name` / `version`（必填）：展示名与版本号。版本号允许 `1.0` / `1.0.0`，可带 `-prerelease`、`+build` 后缀。
+- `main`（可选）：入口脚本文件名，默认 `main.js`。
+- `description`（可选）：一句话介绍。
+- `contributes.views`：插件提供的视图。`id` 插件内唯一；`title` 展示名；`icon` 可选，SF Symbols 名称。
+- `contributes.commands`：插件提供的命令，出现在命令面板里。
+- `permissions.network`：允许 `breath.fetch` 访问的域名列表，`"*"` 表示任意域名。
+
+## breath.* API
+
+### 注册视图
+
+```js
+breath.ui.registerView(
+    { id: "main", title: "RSS", icon: "dot.radiowaves.up.forward" },
+    function (props) { return tree; },          // renderHandler
+    async function (event) { return newTree; }  // eventHandler（可选）
+);
+```
+
+`renderHandler(props)` 返回组件树 JSON；`eventHandler({type, payload})` 处理交互事件并返回更新后的整棵树。两者都可以是 async 函数。
+
+### 注册命令
+
+```js
+breath.commands.register({ id: "refresh", title: "刷新所有订阅" }, async function (payload) {
+    // …
+    return null; // 返回值序列化为 JSON 回传给调用方
+});
+```
+
+### 网络
+
+```js
+var res = await breath.fetch("https://example.com/feed.xml");
+// res = { status: 200, headers: {...}, body: "..." }
+// 可选：breath.fetch(url, { method, headers, body })
+```
+
+### 键值存储（仅字符串，按插件隔离）
+
+```js
+await breath.storage.set("feeds", JSON.stringify(feeds));
+var raw = await breath.storage.get("feeds"); // 不存在时为 null
+await breath.storage.delete("feeds");
+```
+
+### 系统通知
+
+```js
+await breath.notifications.post({ title: "RSS 阅读器", body: "所有订阅已刷新。" });
+```
+
+## 组件树 schema
+
+每个节点是一个 JSON 对象，`type` 必填，其余属性平铺：
+
+- `vstack` / `hstack`：`spacing?`、`children`（必填）
+- `text`：`content`（必填）、`style?: "title"|"headline"|"body"|"caption"`、`color?: "primary"|"secondary"`、`lineLimit?`
+- `button`：`title`（必填）、`onPress?`（任意 JSON，点按时以 `button.press` 事件原样回传）、`style?: "bordered"|"plain"`、`enabled?`
+- `textfield`：`placeholder?`、`value`（必填）、`onSubmit?`（回车提交时以 `textfield.submit` 事件回传，提交文本并入 payload 的 `text` 字段）
+- `image`：`url`（必填，http/https）、`width?`、`height?`
+- `list`：`children`（必填）。每个子节点是一行，可携带 `onSelect?`（点按行时以 `list.select` 事件回传）
+- `webcontent`：`html`（必填，HTML 片段，在沙盒 WebView 里只读渲染，链接由系统浏览器打开）
+- `divider`、`spacer`（`length?`）
+
+事件类型：`button.press`、`textfield.submit`、`list.select`。事件 payload 就是组件上声明的 `onPress` / `onSubmit` / `onSelect` JSON（`textfield.submit` 额外并入 `text`）。
+
+注意：组件没有 `onChange`，按钮拿不到输入框里的文本——需要文本的操作请通过 `textfield.submit` 触发。
+
+## 用户如何安装
+
+1. 打开 Breath 的「插件」页。
+2. 在「插件源」输入框填入本仓库地址（`https://github.com/<owner>/breath-plugins`），点「添加」。
+3. 在插件列表里选择插件安装；安装页会展示插件声明的权限（如网络访问范围）。
+
+## 如何发布自己的插件仓库
+
+1. 新建一个公开 GitHub 仓库，按上面的结构放 `plugins.json` 与插件目录。
+2. 在 Breath 的「插件」页添加你的仓库地址，验证能列出并安装插件。
+3. 把地址分享给其他用户即可。发布新版本时修改 `plugin.json` 与 `plugins.json` 里的 `version`，已安装用户会在「插件」页看到更新提示。
+
+写作建议：
+
+- 处理器里捕获所有异常，失败时把错误展示在组件树里，不要让异常逃出处理器。
+- 需要持久化的状态走 `breath.storage`（仅存字符串，复杂数据用 `JSON.stringify`）。
+- `permissions.network` 按实际需要声明域名；只有确实无法枚举域名时才用 `"*"`。
+
+## 示例插件
+
+- [RSS 阅读器](plugins/rss-reader/)：订阅 RSS/Atom Feed，列表浏览文章，正文用 webcontent 渲染。演示了视图 + 命令 + fetch + storage + 通知的完整用法。

@@ -1,0 +1,18 @@
+{
+  "id": "app.breath.plugins.rss",
+  "name": "RSS 阅读器",
+  "version": "0.1.0",
+  "description": "订阅 RSS/Atom Feed，在 Breath 里阅读文章。",
+  "main": "main.js",
+  "contributes": {
+    "views": [
+      { "id": "main", "title": "RSS", "icon": "dot.radiowaves.up.forward" }
+    ],
+    "commands": [
+      { "id": "refresh", "title": "刷新所有订阅" }
+    ]
+  },
+  "permissions": {
+    "network": ["*"]
+  }
+}

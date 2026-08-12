@@ -1,0 +1,507 @@
+// RSS 阅读器 —— Breath 锚点插件。
+//
+// 只使用 v1 插件 API。JavaScriptCore 没有 DOM/XML 解析器、没有 setTimeout，
+// 因此 RSS/Atom 用纯正则提取；所有异步都走 breath.* 返回的 Promise。
+//
+// 状态模型：全部状态保存在本文件的闭包变量里（每个插件一个独立 JSContext）。
+// 渲染是全量重渲染：任何事件处理后都返回一棵完整的新组件树。
+
+"use strict";
+
+// MARK: - 状态
+
+var state = {
+    loaded: false,          // 是否已从 breath.storage 恢复订阅列表
+    feeds: [],              // [{url, title}]，持久化到 storage（key: "feeds"）
+    articles: {},           // url -> [{title, link, html, date}]，仅会话内存
+    selectedFeed: null,     // 当前选中订阅的 url
+    selectedArticle: -1,    // 当前打开的文章在 articles[selectedFeed] 里的下标，-1 表示未打开
+    message: null           // 展示给用户的错误/提示文本
+};
+
+var STORAGE_KEY = "feeds";
+
+// 首次使用时的恢复 Promise，保证只加载一次（并发调用共享同一个 Promise）。
+var loadPromise = null;
+
+function ensureLoaded() {
+    if (!loadPromise) {
+        loadPromise = breath.storage.get(STORAGE_KEY).then(function (raw) {
+            if (typeof raw === "string" && raw) {
+                try {
+                    var saved = JSON.parse(raw);
+                    if (Array.isArray(saved)) {
+                        state.feeds = saved.filter(function (f) {
+                            return f && typeof f.url === "string";
+                        }).map(function (f) {
+                            return { url: f.url, title: String(f.title || f.url) };
+                        });
+                    }
+                } catch (ignored) {
+                    // 存储内容损坏时按空列表处理，不影响插件可用性。
+                }
+            }
+            state.loaded = true;
+        });
+    }
+    return loadPromise;
+}
+
+function saveFeeds() {
+    return breath.storage.set(STORAGE_KEY, JSON.stringify(state.feeds));
+}
+
+// MARK: - 容错 XML 提取（RSS 2.0 + Atom）
+
+// 提取 <tag>…</tag> 的文本，兼容命名空间写法（<content:encoded>、<dc:date>）。
+function textOf(xml, tag) {
+    var re = new RegExp(
+        "<(?:\\w+:)?" + tag + "(\\s[^>]*)?>([\\s\\S]*?)</(?:\\w+:)?" + tag + "\\s*>", "i");
+    var m = re.exec(xml);
+    if (!m) { return ""; }
+    return decodeEntities(stripCDATA(m[2])).trim();
+}
+
+function stripCDATA(s) {
+    return s.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1");
+}
+
+function decodeEntities(s) {
+    return s.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, function (match, entity) {
+        switch (entity) {
+        case "amp": return "&";
+        case "lt": return "<";
+        case "gt": return ">";
+        case "quot": return "\"";
+        case "apos": return "'";
+        case "nbsp": return " ";
+        default:
+            if (entity.charAt(0) === "#") {
+                var code = entity.charAt(1).toLowerCase() === "x"
+                    ? parseInt(entity.slice(2), 16)
+                    : parseInt(entity.slice(1), 10);
+                if (!isNaN(code)) {
+                    try { return String.fromCodePoint(code); } catch (ignored) {}
+                }
+            }
+            return match;
+        }
+    });
+}
+
+function attrOf(tag, name) {
+    var re = new RegExp(name + "\\s*=\\s*(\"([^\"]*)\"|'([^']*)')", "i");
+    var m = re.exec(tag);
+    return m ? decodeEntities(m[2] || m[3] || "") : "";
+}
+
+// Atom 的 <link> 是自闭合标签，优先取 rel="alternate"（或缺省 rel）的 href。
+function atomLink(xml) {
+    var re = /<link\b[^>]*>/gi;
+    var fallback = "";
+    var m;
+    while ((m = re.exec(xml))) {
+        var href = attrOf(m[0], "href");
+        if (!href) { continue; }
+        var rel = attrOf(m[0], "rel");
+        if (!rel || rel === "alternate") { return href; }
+        if (!fallback) { fallback = href; }
+    }
+    return fallback;
+}
+
+function formatDate(raw) {
+    if (!raw) { return ""; }
+    var t = Date.parse(raw);
+    if (isNaN(t)) { return raw; }
+    var d = new Date(t);
+    function pad(n) { return (n < 10 ? "0" : "") + n; }
+    return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+}
+
+// 解析入口：按是否包含 <item>/<entry> 区分 RSS 2.0 与 Atom。
+function parseFeed(xml) {
+    if (/<item\b/i.test(xml)) { return parseRSS(xml); }
+    if (/<entry\b/i.test(xml)) { return parseAtom(xml); }
+    return { title: "", items: [] };
+}
+
+function parseRSS(xml) {
+    var firstItem = xml.search(/<item\b/i);
+    var head = firstItem >= 0 ? xml.slice(0, firstItem) : xml;
+    var result = { title: textOf(head, "title"), items: [] };
+    var re = /<item\b[\s\S]*?<\/item\s*>/gi;
+    var m;
+    while ((m = re.exec(xml))) {
+        var block = m[0];
+        result.items.push({
+            title: textOf(block, "title") || "（无标题）",
+            link: textOf(block, "link"),
+            // <content:encoded> 优先于 <description>
+            html: textOf(block, "encoded") || textOf(block, "description"),
+            date: formatDate(textOf(block, "pubDate") || textOf(block, "date"))
+        });
+    }
+    return result;
+}
+
+function parseAtom(xml) {
+    var firstEntry = xml.search(/<entry\b/i);
+    var head = firstEntry >= 0 ? xml.slice(0, firstEntry) : xml;
+    var result = { title: textOf(head, "title"), items: [] };
+    var re = /<entry\b[\s\S]*?<\/entry\s*>/gi;
+    var m;
+    while ((m = re.exec(xml))) {
+        var block = m[0];
+        result.items.push({
+            title: textOf(block, "title") || "（无标题）",
+            link: atomLink(block),
+            html: textOf(block, "content") || textOf(block, "summary"),
+            date: formatDate(textOf(block, "published") || textOf(block, "updated"))
+        });
+    }
+    return result;
+}
+
+// MARK: - HTML 处理
+
+function stripHTML(html) {
+    return decodeEntities(
+        html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim());
+}
+
+function escapeHTML(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+}
+
+// webcontent 在沙盒 WKWebView 里加载原始 HTML。剥掉脚本/表单类标签与
+// 内联事件处理器，剩下排版标签原样保留。
+function sanitizeHTML(html) {
+    return html
+        .replace(/<\s*(script|iframe|object|embed|form|link|meta)\b[\s\S]*?(<\/\s*(script|iframe|object|embed|form|link|meta)\s*>|\/?>)/gi, "")
+        .replace(/\son\w+\s*=\s*"[^"]*"/gi, "")
+        .replace(/\son\w+\s*=\s*'[^']*'/gi, "")
+        .replace(/\son\w+\s*=\s*[^\s>]+/gi, "");
+}
+
+function articleDocument(article) {
+    var body = sanitizeHTML(article.html || "");
+    if (!stripHTML(body)) {
+        body = "<p>这篇文章没有正文。</p>";
+    }
+    return "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+        + "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        + "<style>body{font-family:-apple-system,sans-serif;font-size:15px;"
+        + "line-height:1.65;margin:16px;color:#222;}"
+        + "img{max-width:100%;height:auto;}a{color:#0a6dff;}</style>"
+        + "</head><body>" + body + "</body></html>";
+}
+
+// MARK: - 数据加载
+
+// 拉取并解析一个 Feed。失败一律抛 Error，由调用方转成界面上的提示文本。
+function fetchFeed(url) {
+    return breath.fetch(url).then(function (res) {
+        if (res.status < 200 || res.status >= 300) {
+            throw new Error("请求失败（HTTP " + res.status + "）");
+        }
+        var parsed = parseFeed(res.body || "");
+        if (!parsed.title && parsed.items.length === 0) {
+            throw new Error("无法解析该地址的内容（不是有效的 RSS/Atom？）");
+        }
+        return parsed;
+    });
+}
+
+// MARK: - 组件树
+
+function text(content, style, color) {
+    var node = { type: "text", content: String(content) };
+    if (style) { node.style = style; }
+    if (color) { node.color = color; }
+    return node;
+}
+
+// 主视图：顶部添加栏 + 订阅列表 + 选中订阅的文章列表。
+function mainTree() {
+    var children = [
+        {
+            type: "hstack", spacing: 8, children: [
+                {
+                    type: "textfield",
+                    placeholder: "输入 Feed 地址",
+                    value: "",
+                    onSubmit: { action: "add-feed" }
+                },
+                {
+                    type: "button", title: "添加", style: "bordered",
+                    onPress: { action: "add-feed" }
+                }
+            ]
+        }
+    ];
+
+    if (state.message) {
+        children.push(text(state.message, "caption", "secondary"));
+    }
+
+    if (state.feeds.length === 0) {
+        children.push(text("还没有订阅。在上方输入 RSS 或 Atom 地址，按回车添加。", "body", "secondary"));
+        return { type: "vstack", spacing: 12, children: children };
+    }
+
+    children.push({
+        type: "list",
+        children: state.feeds.map(function (feed) {
+            return {
+                type: "hstack", spacing: 8, children: [
+                    text(feed.title, "body"),
+                    { type: "spacer" },
+                    {
+                        type: "button", title: "删除", style: "plain",
+                        onPress: { action: "remove-feed", url: feed.url }
+                    }
+                ],
+                onSelect: { action: "select-feed", url: feed.url }
+            };
+        })
+    });
+
+    children.push({ type: "divider" });
+
+    if (!state.selectedFeed) {
+        children.push(text("从上方列表选择一个订阅查看文章。", "body", "secondary"));
+        return { type: "vstack", spacing: 12, children: children };
+    }
+
+    var feed = findFeed(state.selectedFeed);
+    var articles = state.articles[state.selectedFeed] || [];
+    children.push({
+        type: "hstack", spacing: 8, children: [
+            text(feed ? feed.title : state.selectedFeed, "headline"),
+            { type: "spacer" },
+            {
+                type: "button", title: "刷新", style: "bordered",
+                onPress: { action: "refresh" }
+            }
+        ]
+    });
+
+    if (articles.length === 0) {
+        children.push(text("这个订阅还没有文章，点「刷新」试试。", "body", "secondary"));
+    } else {
+        children.push({
+            type: "list",
+            children: articles.map(function (article, index) {
+                var row = [text(article.title, "body", null)];
+                if (article.date) {
+                    row.push(text(article.date, "caption", "secondary"));
+                }
+                return {
+                    type: "vstack", spacing: 2, children: row,
+                    onSelect: {
+                        action: "select-article",
+                        feed: state.selectedFeed,
+                        index: index
+                    }
+                };
+            })
+        });
+    }
+
+    return { type: "vstack", spacing: 12, children: children };
+}
+
+// 文章详情：标题 + 日期 + 正文（webcontent）+ 返回。
+function articleTree() {
+    var articles = state.articles[state.selectedFeed] || [];
+    var article = articles[state.selectedArticle];
+    if (!article) {
+        state.selectedArticle = -1;
+        return mainTree();
+    }
+    var children = [text(article.title, "headline")];
+    if (article.date) {
+        children.push(text(article.date, "caption", "secondary"));
+    }
+    children.push({ type: "webcontent", html: articleDocument(article) });
+    children.push({
+        type: "button", title: "返回", style: "plain",
+        onPress: { action: "back" }
+    });
+    return { type: "vstack", spacing: 8, children: children };
+}
+
+function tree() {
+    if (state.selectedArticle >= 0 && state.selectedFeed) {
+        return articleTree();
+    }
+    return mainTree();
+}
+
+function findFeed(url) {
+    for (var i = 0; i < state.feeds.length; i++) {
+        if (state.feeds[i].url === url) { return state.feeds[i]; }
+    }
+    return null;
+}
+
+// MARK: - 事件处理
+
+function addFeed(url) {
+    url = (url || "").trim();
+    if (!url) {
+        // “添加”按钮拿不到输入框内容（v1 组件没有 onChange），
+        // 真正的入口是输入框回车提交的 textfield.submit。
+        state.message = "请在输入框中输入 Feed 地址后按回车添加。";
+        return Promise.resolve();
+    }
+    if (!/^https?:\/\//i.test(url)) {
+        state.message = "地址需要以 http:// 或 https:// 开头。";
+        return Promise.resolve();
+    }
+    if (findFeed(url)) {
+        state.message = "这个订阅已经添加过了。";
+        return Promise.resolve();
+    }
+    return fetchFeed(url).then(function (parsed) {
+        state.feeds.push({ url: url, title: parsed.title || url });
+        state.articles[url] = parsed.items;
+        state.selectedFeed = url;
+        state.selectedArticle = -1;
+        state.message = null;
+        return saveFeeds();
+    }).catch(function (error) {
+        state.message = "添加失败：" + errorMessage(error);
+    });
+}
+
+function selectFeed(url) {
+    state.selectedFeed = url;
+    state.selectedArticle = -1;
+    state.message = null;
+    if (state.articles[url]) { return Promise.resolve(); }
+    // 首次选中（例如重启后）补拉一次文章。
+    return fetchFeed(url).then(function (parsed) {
+        state.articles[url] = parsed.items;
+        var feed = findFeed(url);
+        if (feed && parsed.title) {
+            feed.title = parsed.title;
+            return saveFeeds();
+        }
+    }).catch(function (error) {
+        state.message = "加载失败：" + errorMessage(error);
+    });
+}
+
+function removeFeed(url) {
+    state.feeds = state.feeds.filter(function (feed) { return feed.url !== url; });
+    delete state.articles[url];
+    if (state.selectedFeed === url) {
+        state.selectedFeed = null;
+        state.selectedArticle = -1;
+    }
+    state.message = null;
+    return saveFeeds();
+}
+
+function refreshSelected() {
+    if (!state.selectedFeed) {
+        state.message = "请先选择一个订阅。";
+        return Promise.resolve();
+    }
+    var url = state.selectedFeed;
+    return fetchFeed(url).then(function (parsed) {
+        state.articles[url] = parsed.items;
+        var feed = findFeed(url);
+        if (feed && parsed.title) {
+            feed.title = parsed.title;
+            return saveFeeds();
+        }
+        state.message = null;
+    }).catch(function (error) {
+        state.message = "刷新失败：" + errorMessage(error);
+    });
+}
+
+function errorMessage(error) {
+    return (error && error.message) ? error.message : String(error);
+}
+
+function onEvent(event) {
+    var payload = event.payload || {};
+    var action = payload.action;
+    var work;
+    if (action === "add-feed") {
+        work = addFeed(typeof payload.text === "string" ? payload.text : "");
+    } else if (action === "select-feed" && typeof payload.url === "string") {
+        work = selectFeed(payload.url);
+    } else if (action === "select-article") {
+        state.selectedFeed = typeof payload.feed === "string" ? payload.feed : state.selectedFeed;
+        state.selectedArticle = typeof payload.index === "number" ? payload.index : -1;
+        state.message = null;
+        work = Promise.resolve();
+    } else if (action === "remove-feed" && typeof payload.url === "string") {
+        work = removeFeed(payload.url);
+    } else if (action === "refresh") {
+        work = refreshSelected();
+    } else if (action === "back") {
+        state.selectedArticle = -1;
+        work = Promise.resolve();
+    } else {
+        work = Promise.resolve();
+    }
+    // 任何失败都不许逃出处理器：转成界面上的提示文本，照常返回新树。
+    return work.then(function () {
+        return tree();
+    }, function (error) {
+        state.message = "操作失败：" + errorMessage(error);
+        return tree();
+    });
+}
+
+// MARK: - 注册贡献
+
+breath.ui.registerView(
+    { id: "main", title: "RSS", icon: "dot.radiowaves.up.forward" },
+    function (props) {
+        return ensureLoaded().then(function () { return tree(); });
+    },
+    onEvent
+);
+
+breath.commands.register(
+    { id: "refresh", title: "刷新所有订阅" },
+    function (payload) {
+        return ensureLoaded().then(function () {
+            var failures = 0;
+            // 逐个串行刷新，失败计数但不中断其余订阅。
+            var chain = Promise.resolve();
+            state.feeds.forEach(function (feed) {
+                chain = chain.then(function () {
+                    return fetchFeed(feed.url).then(function (parsed) {
+                        feed.title = parsed.title || feed.title;
+                        state.articles[feed.url] = parsed.items;
+                    }, function () {
+                        failures += 1;
+                    });
+                });
+            });
+            return chain.then(function () {
+                return saveFeeds();
+            }).then(function () {
+                return breath.notifications.post({
+                    title: "RSS 阅读器",
+                    body: failures === 0
+                        ? "所有订阅已刷新。"
+                        : "刷新完成，" + failures + " 个订阅失败。"
+                });
+            }).catch(function () {
+                // 通知服务不可用等收尾失败不影响命令结果。
+            }).then(function () {
+                return null;
+            });
+        });
+    }
+);

@@ -1,0 +1,11 @@
+{
+  "plugins": [
+    {
+      "id": "app.breath.plugins.rss",
+      "name": "RSS 阅读器",
+      "version": "0.1.0",
+      "description": "订阅 RSS/Atom Feed，在 Breath 里阅读文章。",
+      "path": "plugins/rss-reader"
+    }
+  ]
+}
