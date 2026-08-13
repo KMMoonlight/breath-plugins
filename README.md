@@ -2,6 +2,8 @@
 
 Breath 的官方插件仓库。用户在 Breath 的「插件」页添加本仓库地址后，即可浏览并安装这里收录的插件。
 
+插件开发流程、运行模型与排错指南见 [DEVELOPMENT.md](DEVELOPMENT.md)；本文件是契约与字段级参考。
+
 ## 什么是 Breath 插件
 
 Breath 插件是一个运行在 JavaScriptCore 沙盒里的 JavaScript 包。宿主注入全局 `breath` 对象作为唯一 API 入口；插件通过它注册视图与命令、发起网络请求、读写键值存储、发送系统通知。
@@ -35,7 +37,7 @@ breath-plugins/
     {
       "id": "app.breath.plugins.rss",
       "name": "RSS 阅读器",
-      "version": "0.1.5",
+      "version": "0.1.24",
       "description": "订阅 RSS/Atom Feed，在 Breath 里阅读文章。",
       "path": "plugins/rss-reader"
     }
@@ -51,7 +53,7 @@ breath-plugins/
 {
   "id": "app.breath.plugins.rss",
   "name": "RSS 阅读器",
-  "version": "0.1.5",
+  "version": "0.1.24",
   "description": "订阅 RSS/Atom Feed，在 Breath 里阅读文章。",
   "main": "main.js",
   "contributes": {
@@ -75,7 +77,7 @@ breath-plugins/
 - `main`（可选）：入口脚本文件名，默认 `main.js`。
 - `description`（可选）：一句话介绍。
 - `contributes.views`：插件提供的视图。`id` 插件内唯一；`title` 展示名；`icon` 可选，SF Symbols 名称。
-- `contributes.commands`：插件提供的命令，出现在命令面板里。
+- `contributes.commands`：插件提供的命令，出现在菜单栏的「插件」菜单里。
 - `permissions.network`：允许 `breath.fetch` 访问的域名列表，`"*"` 表示任意域名。
 
 ## breath.* API
@@ -90,7 +92,20 @@ breath.ui.registerView(
 );
 ```
 
+可用 `breath.ui.supports("dialog")` 探测宿主是否支持某个组件类型。需要 `dialog` 的插件应明确要求支持它的宿主版本，不应静默降级成语义不同的 `sheet`。
+
 `renderHandler(props)` 返回组件树 JSON；`eventHandler({type, payload})` 处理交互事件并返回更新后的整棵树。两者都可以是 async 函数。
+
+如果事件应当立即返回，但仍需在后台完成网络请求或其他异步工作，可以在状态更新后调用 `breath.ui.invalidate(viewID)`。宿主收到通知后会再次调用对应视图的 `renderHandler`：
+
+```js
+breath.fetch(articleURL).then(function (response) {
+    articleHTML = response.body;
+    return breath.ui.invalidate("main");
+});
+```
+
+不要为了等待后台请求而阻塞文章选择等高频交互。`invalidate` 只请求重新渲染，不会产生组件事件。
 
 ### 注册命令
 
@@ -144,33 +159,50 @@ var name = await breath.dialogs.prompt({
     placeholder: "名称",
     initialValue: "旧名"
 });
+
+// 由用户通过系统文件面板选择 UTF-8/UTF-16 文本文件。
+// 插件只能收到文件名与内容，不能访问本地路径；文件最大 2 MB。
+var file = await breath.dialogs.openTextFile({
+    title: "导入 OPML",
+    allowedExtensions: ["opml", "xml"]
+});
+if (file) {
+    // file = { name: "subscriptions.opml", contents: "..." }
+}
 ```
 
-RSS 示例用 `sheet` 承载订阅源列表，并用 `prompt` 添加地址、用 `confirm` 确认删除；阅读主页只保留订阅源设置入口。
+RSS 示例用 `dialog` 弹出订阅源列表，并用 `prompt` 添加地址、用 `confirm` 确认删除；阅读主页只保留订阅源设置入口。
 
 ## 组件树 schema
 
 每个节点是一个 JSON 对象，`type` 必填，其余属性平铺：
 
 - `vstack` / `hstack`：`spacing?`、`children`（必填）
-- `text`：`content`（必填）、`style?: "title"|"headline"|"body"|"caption"`、`color?: "primary"|"secondary"`、`lineLimit?`
+- `text`：`content`（必填）、`style?: "title"|"headline"|"body"|"caption"`、`color?: "primary"|"secondary"|"green"`、`lineLimit?`
 - `button`：`title`（必填，同时作为无障碍标签）、`systemImage?`（SF Symbol）、`onPress?`（任意 JSON，点按时以 `button.press` 事件原样回传）、`style?: "bordered"|"plain"`、`enabled?`
 - `textfield`：`placeholder?`、`value`（必填）、`onSubmit?`、`submitTitle?`。回车或点击可选的提交按钮时以 `textfield.submit` 事件回传，提交文本并入 payload 的 `text` 字段
-- `image`：`url`（必填，http/https）、`width?`、`height?`
-- `list`：`children`（必填）、`style?: "plain"|"cards"`。每个子节点是一行，可携带 `onSelect?`（点按行时以 `list.select` 事件回传）
+- `image`：`url`（必填，http/https）、`width?`、`height?`、`style?: "sourceIcon"`。站点小图标会按更小尺寸解码，并与正文图片采用不同的资源限额
+- `list`：`children`（必填）、`style?: "plain"|"cards"`。每个子节点是一行，可携带 `onSelect?`（点按行时以 `list.select` 事件回传）、`onAppear?`（该行进入滚动视口时以 `list.rowAppear` 事件回传）、`selected?`。把 `onAppear` 放在当前最后一行可实现滚动到底追加下一批
+- `segmented`：`options: [{value, title}]`（必填）、`selection`（必填）、`onChange?`（选择变化时以 `segmented.change` 事件回传，payload 并入 `value` 字段）
+- `splitview`：`leading`、`trailing`（必填）、`leadingWidth?`。渲染为可拖动的原生左右分栏
 - `webcontent`：`html`（必填，HTML 片段，在沙盒 WebView 里只读渲染，链接由系统浏览器打开）
+- `dialog`：`content`（必填）、`width?`、`height?`、`onDismiss?`（关闭弹窗时以 `dialog.dismiss` 事件回传）
 - `sheet`：`content`（必填）、`width?`、`height?`、`onDismiss?`（系统关闭时以 `sheet.dismiss` 事件回传）
 - `divider`、`spacer`（`length?`）
 
-事件类型：`button.press`、`textfield.submit`、`list.select`、`sheet.dismiss`。事件 payload 就是组件上声明的 `onPress` / `onSubmit` / `onSelect` / `onDismiss` JSON（`textfield.submit` 额外并入 `text`）。
+事件类型：`button.press`、`textfield.submit`、`list.select`、`list.rowAppear`、`segmented.change`、`dialog.dismiss`、`sheet.dismiss`。事件 payload 就是组件上声明的 `onPress` / `onSubmit` / `onSelect` / `onAppear` / `onChange` / `onDismiss` JSON（`textfield.submit` 额外并入 `text`，`segmented.change` 额外并入 `value`）。
 
-注意：组件没有 `onChange`，独立的 `button` 拿不到相邻输入框里的文本。需要“输入框 + 提交按钮”时，在 `textfield` 上设置 `submitTitle`；宿主会让按钮和回车共用 `textfield.submit` 事件。
+注意：`textfield` 没有 `onChange`，独立的 `button` 拿不到相邻输入框里的文本。需要“输入框 + 提交按钮”时，在 `textfield` 上设置 `submitTitle`；宿主会让按钮和回车共用 `textfield.submit` 事件。
 
 ## 用户如何安装
 
-1. 打开 Breath 的「插件」页。
-2. 在「插件源」输入框填入本仓库地址（`https://github.com/<owner>/breath-plugins`），点「添加」。
-3. 在插件列表里选择插件安装；安装页会展示插件声明的权限（如网络访问范围）。
+**从插件源安装**：
+
+1. 打开 Breath 的「插件」页，点右上角齿轮菜单 →「管理插件源…」。
+2. 填入插件源仓库地址（如 `https://github.com/<owner>/breath-plugins`），点「添加」。
+3. 回到「可安装」列表选择插件安装；安装确认页会展示来源与插件声明的权限（如网络访问范围）。
+
+**从本地安装**：齿轮菜单 →「从本地添加插件…」，选择插件文件夹或 zip 包即可，适合插件开发者本地迭代（同 id 直接覆盖替换，无需重启）。
 
 ## 如何发布自己的插件仓库
 
